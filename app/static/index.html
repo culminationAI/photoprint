@@ -1,0 +1,637 @@
+<!doctype html>
+<!--
+  Страница оператора «Печать картинок» (спецификация § 4.6).
+
+  Браузер не видит ни папку, ни USB-принтер: всё, что здесь показано,
+  страница получает от своего сервера по HTTP (§ 4.4) — список картинок,
+  миниатюры, печать и состояние принтера. Файл один, стили и скрипт
+  встроены: внешних адресов нет, и страница работает без интернета.
+
+  Правила спецификации, которые держит страница:
+  - U1 — шапка: название, путь папки, индикатор принтера;
+  - U2 — одна колонка карточек в порядке ответа сервера;
+  - U3 — карточка: миниатюра с просмотром во весь экран (с верха картинки),
+    имя, счётчики, кнопка «Печать» или причина, почему картинка не
+    печатается;
+  - U4 — печать: одна за раз, итог — всплывающее сообщение или красная
+    строка под карточкой; второй щелчок двойного щелчка и щелчок сразу
+    после сдвига списка не печатают, фокус клавиатуры после ответа — снова
+    на кнопке;
+  - U5 — опрос: список каждые 3 с, принтер каждые 5 с; карточки, у которых
+    ничего не изменилось, не пересоздаются;
+  - U6 — текст для пустой папки;
+  - U7 — сбой списка показывается на месте списка;
+  - U8 — данные выводятся только как текст, имена в адресе закодированы.
+
+  Стиль — как у страницы клиента ресепшена YO: термочек, моноширинный
+  шрифт, чёрное на белом.
+-->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Печать картинок</title>
+<style>
+/* Язык страницы взят у термочека и у клиента ресепшена: чёрное по белому,
+   моноширинный шрифт. Моноширинный здесь не украшение: в именах файлов
+   цифры и похожие буквы различаются по знакам. */
+:root{
+  --paper:#FFFFFF;
+  --field:#E8E8E4;
+  --ink:#0A0A0A;
+  --ink-soft:#6B6B66;
+  --rule:#C9C9C3;
+  --alert:#D01A1A;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+/* U6, U7: страница прячет список и текст под ним атрибутом hidden. Свой
+   display у .list перебил бы встроенное правило браузера, поэтому hidden
+   здесь сильнее любого класса. */
+[hidden]{display:none!important}
+html,body{height:100%}
+body{
+  margin:0; background:var(--field); color:var(--ink);
+  font-family:var(--mono); font-size:15px; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
+
+/* ── шапка (U1) ──────────────────────────────────────── */
+.bar{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; gap:24px; flex-wrap:wrap;
+  padding:14px 20px; background:var(--ink); color:var(--paper);
+  border-bottom:3px solid var(--ink);
+}
+/* text-transform:uppercase у названия, кнопки и всплывающего сообщения —
+   стиль страницы клиента ресепшена (правило задачи «Стиль»), там те же
+   .brand, .go и .toast. Прописными буквы делает только отрисовка: в DOM
+   текст остаётся дословным из § 4.6 («Печать картинок», «Печать»,
+   «Печатаю…», «Напечатано»), его и проверяют тесты. */
+.brand{margin:0; font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase}
+/* Путь папки бывает длинным и без пробелов — переносится по любому знаку. */
+.folder{flex:1; min-width:0; font-size:12px; letter-spacing:.04em; opacity:.6; word-break:break-all}
+.printer{display:flex; align-items:center; gap:8px; font-size:12px; letter-spacing:.06em; white-space:nowrap}
+/* До первого ответа /api/printer огонёк серый: состояние ещё неизвестно. */
+.led{width:9px; height:9px; border-radius:50%; background:var(--ink-soft)}
+.led[data-state="ready"]{background:var(--paper)}
+.led[data-state="missing"]{background:var(--alert)}
+
+/* ── одна колонка карточек (U2) ──────────────────────── */
+.page{max-width:760px; margin:0 auto; padding:20px}
+.list{display:flex; flex-direction:column; gap:10px; list-style:none; margin:0; padding:0}
+.card{
+  display:grid; grid-template-columns:120px 1fr auto; gap:16px; align-items:center;
+  padding:12px 14px; background:var(--paper); border:1.5px solid var(--ink);
+}
+/* U3: миниатюра в пропорциях картинки — горизонтальная (576×300) видна
+   целиком. Высота ограничена: у длинного чека в миниатюре виден его верх. */
+.thumb{
+  width:120px; height:auto; max-height:160px; object-fit:cover; object-position:top;
+  background:var(--paper); border:1px solid var(--rule); cursor:zoom-in; display:block;
+}
+.name{font-size:17px; font-weight:700; letter-spacing:-.01em; word-break:break-all}
+.meta{margin-top:2px; font-size:12px; color:var(--ink-soft); letter-spacing:.04em}
+
+/* uppercase — стиль клиента ресепшена, текст в DOM дословный (см. .brand). */
+.go{
+  padding:11px 20px; background:var(--ink); color:var(--paper);
+  border:1.5px solid var(--ink); cursor:pointer;
+  font-size:13px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; white-space:nowrap;
+}
+.go:hover{background:var(--paper); color:var(--ink)}
+.go:disabled{cursor:wait; background:var(--ink-soft); border-color:var(--ink-soft); color:var(--paper)}
+
+/* U3: у непригодной картинки на месте кнопки — причина красным. */
+.bad{max-width:30ch; color:var(--alert); font-size:13px; text-align:right}
+/* U4, U7: ошибка печати под карточкой и сбой списка на его месте. В тексте
+   сбоя бывает путь папки (W7), а в тексте пустой папки он есть всегда (U6):
+   длинный путь без пробелов переносится, а не вылезает за край. */
+.fail{
+  grid-column:1/-1; margin:4px 0 0; padding:9px 11px;
+  border-left:4px solid var(--alert); background:#FBEAEA; color:var(--alert); font-size:13px;
+  overflow-wrap:break-word;
+}
+/* U6: текст пустой папки — серым, это не сбой. */
+.empty{margin:0; padding:26px 2px; color:var(--ink-soft); font-size:14px; max-width:44ch; overflow-wrap:break-word}
+
+/* ── просмотр во весь экран (U3) ─────────────────────── */
+/* Картинка бывает длиннее экрана: просмотр прокручивается, а auto-поля
+   держат её по центру, не обрезая верх. */
+.peek{
+  position:fixed; inset:0; z-index:40; display:none; overflow:auto;
+  padding:32px; background:rgba(10,10,10,.82); cursor:zoom-out;
+}
+.peek[data-open="true"]{display:flex}
+.peek img{margin:auto; max-width:100%; background:var(--paper); padding:10px}
+
+/* U4: всплывающее «Напечатано». uppercase — стиль клиента ресепшена, текст
+   в DOM дословный (см. .brand). */
+.toast{
+  position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+  z-index:50; padding:11px 22px; background:var(--ink); color:var(--paper);
+  font-size:13px; letter-spacing:.1em; text-transform:uppercase;
+  opacity:0; pointer-events:none; transition:opacity .18s;
+}
+.toast[data-show="true"]{opacity:1}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <h1 class="brand">Печать картинок</h1>
+  <span class="folder" id="folder"></span>
+  <span class="printer"><span class="led" id="led"></span><span id="printerText"></span></span>
+</header>
+
+<main class="page">
+  <ul class="list" id="list"></ul>
+  <p class="empty" id="note" hidden></p>
+</main>
+
+<div class="peek" id="peek"><img id="peekImg" alt=""></div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+/* Тексты для оператора — дословно из § 4.6 (U1, U3, U4, U6, U7). Строки с
+   подстановкой — функции с шаблонной строкой: пробелы и знаки вокруг
+   подстановки остаются ровно такими, как в спецификации. */
+const PRINTER_READY = "принтер готов";
+const PRINTER_MISSING = "принтер не найден";
+const COUNTS = (printed, failed) => `напечатано: ${printed} · ошибок печати: ${failed}`;
+const PRINT = "Печать";
+const PRINTING = "Печатаю…";
+const PRINTED = "Напечатано";
+const CLIENT_ERROR = (status) => `Ошибка клиента: HTTP ${status}. Запустите «Печать картинок» ещё раз.`;
+const NO_ANSWER = "Клиент не отвечает. Запустите «Печать картинок» ещё раз.";
+const EMPTY = (folder) => `В папке нет картинок. Положите JPEG шириной 576 px в папку ${folder} — картинка появится здесь сама.`;
+
+/* Карточки на странице: имя файла → {key, el, button, fail}.
+   key — «ctime|error|printed|failed» (U5): пока он тот же, карточка не
+   пересоздаётся и её миниатюра не мигает; button — кнопка «Печать» или
+   null у непригодной картинки; fail — красная строка ошибки печати или null. */
+let cards = new Map();
+// Имя картинки, которая сейчас печатается, или null (U4).
+let printing = null;
+// Номер последнего отправленного запроса списка и номер того запроса,
+// чей ответ сейчас на экране (см. loadImages). Почему номера: список
+// запрашивают загрузка, тик (U5) и повтор сразу после печати (U4), и на
+// медленном диске ответы приходят не в том порядке, в каком ушли запросы.
+// Ответ старше показанного отбрасывается: иначе список, снятый до печати,
+// вернулся бы позже свежего и затёр бы новые счётчики карточки (U3, U4).
+let listAsked = 0;
+let listShown = 0;
+// Сколько запросов списка ещё не вернулось (U5). Тик списка пропускается,
+// пока это число не 0: медленный диск (папка в iCloud) не копит запросы.
+// Счётчик, а не флаг «да/нет»: запрос после печати (U4 «сразу») уходит,
+// даже когда запрос тика ещё в полёте. Флаг сбросил бы тот из двух, что
+// вернулся первым, и тик отправил бы новый запрос при живом старом; после
+// каждой такой печати в полёте оставалось бы на один запрос больше.
+let listPending = 0;
+let toastTimer = 0;
+// U4: сколько миллисекунд после сдвига списка щелчок мышью по «Печать» не
+// считается (0,8 с). Опрос вставляет новую картинку наверх (F2), и кнопка,
+// на которую навёл оператор, уезжает из-под неподвижного указателя: щелчок
+// пришёлся бы на «Печать» другой картинки, и напечаталась бы она.
+const LIST_SETTLE_MS = 800;
+// Когда список сдвинулся в последний раз (performance.now(), U4); -Infinity —
+// ещё ни разу.
+let listMovedAt = -Infinity;
+// U4: высота каждой карточки, какой её в последний раз видел cardResizes.
+// WeakMap: карточка, ушедшая со страницы, не держится здесь в памяти.
+const cardHeights = new WeakMap();
+// U4: наблюдатель высоты карточек (cardsResized). Карточка наблюдается с
+// создания (makeCard) до ухода со страницы (showList).
+const cardResizes = new ResizeObserver(cardsResized);
+
+/** Найти элемент страницы по его id. */
+const $ = (id) => document.getElementById(id);
+
+/**
+ * Текст отказа из ответа не 200 (W6, U4, U7).
+ *
+ * Сервер кладёт в тело JSON со строкой detail — оператор видит её как есть.
+ * Если тело не JSON или detail не строка (например, голый 500 Starlette),
+ * остаётся общий текст с кодом ответа.
+ */
+async function problemText(response) {
+  try {
+    const body = await response.json();
+    if (body !== null && typeof body.detail === "string") return body.detail;
+  } catch (err) {
+    // Тело не разобралось как JSON — ниже общий текст с кодом.
+  }
+  return CLIENT_ERROR(response.status);
+}
+
+/** Показать всплывающее сообщение text на пару секунд (U4). */
+function toast(text) {
+  const el = $("toast");
+  el.textContent = text;
+  el.dataset.show = "true";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.dataset.show = "false"; }, 2200);
+}
+
+/** Открыть картинку с адресом src во весь экран, с её верха (U3). */
+function openPeek(src, name) {
+  const img = $("peekImg");
+  img.src = src;
+  img.alt = name;
+  $("peek").dataset.open = "true";
+  // U3: просмотр открывается с верха картинки. Браузер помнит прокрутку
+  // спрятанного (display:none) просмотра и возвращает её при показе —
+  // следующий длинный чек открылся бы на глубине прошлого. Сброс только
+  // после показа: у спрятанного элемента блока прокрутки нет (CSSOM), и
+  // сброс до показа браузер пропускает.
+  $("peek").scrollTop = 0;
+}
+
+/** Закрыть просмотр во весь экран — по клику или Esc (U3). */
+function closePeek() {
+  $("peek").dataset.open = "false";
+}
+
+/**
+ * Запомнить, что список карточек сдвинулся (U4).
+ *
+ * Зовут её showList, когда опрос вставил, убрал или переставил карточки, и
+ * cardsResized, когда карточка сменила высоту на виду. performance.now(), а
+ * не Date.now(): эти часы не прыгают, когда мак переводит время.
+ */
+function listMoved() {
+  listMovedAt = performance.now();
+}
+
+/**
+ * Отметить сдвиг списка, если карточка на виду сменила высоту (U4).
+ *
+ * Миниатюра новой карточки догружается позже самой карточки и сдвигает всё
+ * ниже неё второй раз — на медленном диске уже после LIST_SETTLE_MS; так же
+ * двигают список строка ошибки печати, ширина окна и возврат списка после
+ * сбоя (U7). Первое наблюдение новой карточки — не сдвиг: её появление уже
+ * отметил showList, а пересозданная карточка сравнивается с высотой
+ * прежней (её переносит showList). Карточка, чей верх ниже окна, двигает
+ * только то, что тоже ниже окна: миниатюра, которую браузер догрузил при
+ * прокрутке длинного списка (loading="lazy"), щелчок на экране не отменяет.
+ */
+function cardsResized(entries) {
+  for (const entry of entries) {
+    const height = entry.contentRect.height;
+    const seen = cardHeights.get(entry.target);
+    cardHeights.set(entry.target, height);
+    if (seen !== undefined && seen !== height && entry.target.getBoundingClientRect().top < window.innerHeight) listMoved();
+  }
+}
+
+/** Те же ли имена в том же порядке в списках a и b (U4). */
+function sameNames(a, b) {
+  return a.length === b.length && a.every((name, i) => name === b[i]);
+}
+
+/** Собрать красную строку ошибки печати с текстом text (U4). */
+function makeFail(text) {
+  const fail = document.createElement("p");
+  fail.className = "fail";
+  fail.textContent = text;
+  return fail;
+}
+
+/**
+ * Собрать карточку картинки image из ответа /api/images с ключом key (U3).
+ *
+ * U8: всё, что пришло от сервера, попадает на страницу только через
+ * textContent и свойства элементов. Имя файла может содержать «<», «&» и
+ * кавычки, и разметкой оно не станет.
+ */
+function makeCard(image, key) {
+  const el = document.createElement("li");
+  el.className = "card";
+
+  const thumb = document.createElement("img");
+  thumb.className = "thumb";
+  thumb.loading = "lazy";
+  thumb.alt = image.name;
+  // U3, U8: имя кодируется целиком — в нём бывают пробел, «#», «+», «?» и
+  // «%». «?v=ctime» меняет адрес, когда файл заменили под тем же именем,
+  // и браузер не покажет старую миниатюру из своего кэша.
+  thumb.src = "/api/images/" + encodeURIComponent(image.name) + "?v=" + image.ctime;
+  thumb.addEventListener("click", () => openPeek(thumb.src, image.name));
+
+  const info = document.createElement("div");
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = image.name;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = COUNTS(image.printed, image.failed);
+  info.append(name, meta);
+
+  let button = null;
+  let side;
+  if (image.ok) {
+    button = document.createElement("button");
+    button.className = "go";
+    button.textContent = PRINT;
+    // U4: щелчок мышью (detail не 0) в первые LIST_SETTLE_MS после сдвига
+    // списка не считается — кнопка могла уехать из-под указателя, и
+    // напечаталась бы другая картинка. Нажатие с клавиатуры (detail 0)
+    // печатает всегда: фокус остаётся на этой кнопке, куда бы она ни уехала.
+    // Второй щелчок двойного щелчка сюда не доходит (слушатель на document).
+    button.addEventListener("click", (event) => {
+      if (event.detail !== 0 && performance.now() - listMovedAt < LIST_SETTLE_MS) return;
+      printImage(image.name);
+    });
+    side = button;
+  } else {
+    // U3: кнопки нет — вместо неё причина из F3, почему файл не печатается.
+    side = document.createElement("div");
+    side.className = "bad";
+    side.textContent = image.error;
+  }
+
+  el.append(thumb, info, side);
+  // U4: высоту карточки видит наблюдатель сдвигов (cardsResized).
+  cardResizes.observe(el);
+  return { key, el, button, fail: null };
+}
+
+/**
+ * Расставить в списке элементы els ровно в этом порядке (U2).
+ *
+ * Элемент, который уже стоит на своём месте, не трогается: вынутая и
+ * вставленная заново карточка теряет фокус кнопки, а опрос идёт каждые 3 с.
+ * Всё, что осталось в списке после els, удаляется.
+ */
+function place(els) {
+  const list = $("list");
+  let at = list.firstChild;
+  for (const el of els) {
+    if (el === at) {
+      at = at.nextSibling;
+    } else {
+      list.insertBefore(el, at);
+    }
+  }
+  while (at !== null) {
+    const next = at.nextSibling;
+    at.remove();
+    at = next;
+  }
+}
+
+/**
+ * Показать текст text на месте карточек или спрятать его, если text — null
+ * (U6, U7). failure — красный текст сбоя, иначе серый.
+ */
+function showNote(text, failure) {
+  const note = $("note");
+  note.className = failure ? "fail" : "empty";
+  note.textContent = text === null ? "" : text;
+  note.hidden = text === null;
+}
+
+/**
+ * Показать удачный ответ /api/images: путь папки в шапке и карточки
+ * (U1, U2, U5, U6).
+ *
+ * Карточка пересоздаётся, только если изменился её ключ (U5). Фокус с
+ * кнопки пересозданной карточки переходит на её новую кнопку, а вставка,
+ * удаление и перестановка карточек отмечаются как сдвиг списка (U4).
+ */
+function showList(data) {
+  $("folder").textContent = data.folder;
+
+  const next = new Map();
+  for (const image of data.images) {
+    const key = `${image.ctime}|${image.error}|${image.printed}|${image.failed}`;
+    const old = cards.get(image.name);
+    if (old !== undefined && old.key === key) {
+      next.set(image.name, old);
+      continue;
+    }
+    const card = makeCard(image, key);
+    // U4: пересозданная карточка сравнивается с высотой прежней: новые
+    // счётчики на её месте ничего не сдвигают, другая высота — сдвиг.
+    if (old !== undefined) cardHeights.set(card.el, cardHeights.get(old.el));
+    if (old !== undefined && old.fail !== null) {
+      // U5: строка ошибки печати живёт до следующего нажатия. Неудачная
+      // печать сама меняет ключ («ошибок печати» +1), и без переноса
+      // строка пропала бы вместе со старой карточкой.
+      card.fail = old.fail;
+      card.el.append(old.fail);
+    }
+    next.set(image.name, card);
+  }
+  // Сначала уходят карточки, которых больше нет или которые пересозданы:
+  // тогда place не двигает остальные.
+  let refocus = null;
+  for (const [name, card] of cards) {
+    if (next.get(name) === card) continue;
+    // U4: кнопка пересоздаваемой карточки в фокусе (печать с клавиатуры
+    // изменила счётчик) — фокус уйдёт из документа вместе с ней, и
+    // следующий пробел листал бы страницу. После расстановки он встаёт на
+    // кнопку новой карточки; картинка ушла или стала непригодной — никуда.
+    if (card.button !== null && card.button === document.activeElement && next.has(name)) {
+      refocus = next.get(name).button;
+    }
+    cardResizes.unobserve(card.el);
+    card.el.remove();
+  }
+  // U4: опрос вставил, убрал или переставил карточки — кнопки под указателем
+  // сдвинулись. Пересоздание карточки на её месте (новые счётчики после
+  // печати) сдвигом не считается: повторный щелчок по «Печать» сразу после
+  // «Напечатано» не пропадает. Сдвиг без перестановки (догрузилась
+  // миниатюра) ловит cardsResized.
+  if (!sameNames(Array.from(cards.keys()), Array.from(next.keys()))) listMoved();
+  cards = next;
+  place(Array.from(next.values(), (card) => card.el));
+  if (refocus !== null) refocus.focus({preventScroll: true});
+
+  $("list").hidden = false;
+  showNote(data.images.length === 0 ? EMPTY(data.folder) : null, false);
+}
+
+/**
+ * Показать сбой запроса списка с текстом text (U7).
+ *
+ * Карточки прячутся, а не удаляются: следующий удачный ответ вернёт их
+ * без мигания и вместе со строками ошибок печати.
+ */
+function showListFailure(text) {
+  $("list").hidden = true;
+  showNote(text, true);
+}
+
+/**
+ * Запросить список картинок и показать ответ (U5, U7).
+ *
+ * Ответы приходят не обязательно в том порядке, в каком ушли запросы
+ * (таймер, повтор после печати). Показывается только ответ новее уже
+ * показанного: старый ответ не затирает свежие счётчики.
+ *
+ * Пока запрос в полёте, listPending больше нуля, и тик списка его не
+ * дублирует (U5).
+ */
+async function loadImages() {
+  const seq = ++listAsked;
+  // U5: счёт растёт до fetch — тик закрыт на всё время запроса, включая
+  // ожидание ответа от медленного диска.
+  listPending += 1;
+  let data = null;
+  let failure = null;
+  try {
+    const response = await fetch("/api/images");
+    // U7, W6: успех — ровно 200, как в § 4.4 и U4 («200» и «не 200»). У
+    // каждого ответа не 200 есть строка detail (W6), и её показывает
+    // problemText. response.ok пропустил бы любой код 2xx как список.
+    if (response.status === 200) {
+      data = await response.json();
+    } else {
+      failure = await problemText(response);
+    }
+  } catch (err) {
+    // U7: fetch отклонён или ответ оборвался — сервер недоступен.
+    failure = NO_ANSWER;
+  } finally {
+    // U5: запрос вернулся при любом исходе. Без finally путь мимо этой
+    // строки оставил бы счёт больше нуля навсегда, и список бы больше не
+    // обновлялся.
+    listPending -= 1;
+  }
+  // U4, U5: пока идёт печать, список не меняется — карточка с «Печатаю…»
+  // и недоступные кнопки остаются на месте. Свежий список запрашивается
+  // сразу после ответа печати.
+  if (printing !== null || seq <= listShown) return;
+  listShown = seq;
+  if (failure === null) {
+    showList(data);
+  } else {
+    showListFailure(failure);
+  }
+}
+
+/** Спросить сервер, подключён ли принтер, и обновить индикатор в шапке (U1). */
+async function loadPrinter() {
+  let connected = false;
+  try {
+    const response = await fetch("/api/printer");
+    // U1: поле connected есть только в ответе 200 (§ 4.4). Любой другой
+    // код — неудачный запрос, а это тоже «принтер не найден».
+    if (response.status === 200) connected = (await response.json()).connected === true;
+  } catch (err) {
+    // U1: не удался запрос — тоже «принтер не найден».
+  }
+  $("led").dataset.state = connected ? "ready" : "missing";
+  $("printerText").textContent = connected ? PRINTER_READY : PRINTER_MISSING;
+}
+
+/**
+ * Привести кнопки «Печать» к состоянию печати (U4).
+ *
+ * Пока идёт печать, недоступны все кнопки, а у печатаемой картинки
+ * написано «Печатаю…»: двойной клик и печать другой картинки не уходят
+ * на сервер, пока принтер занят.
+ */
+function setButtons() {
+  for (const [name, card] of cards) {
+    if (card.button === null) continue;
+    card.button.disabled = printing !== null;
+    card.button.textContent = name === printing ? PRINTING : PRINT;
+  }
+}
+
+/**
+ * Напечатать картинку name и показать итог (U4).
+ *
+ * 200 — всплывающее «Напечатано»; другой ответ или отказ fetch — красная
+ * строка под карточкой. После любого ответа сервера список сразу
+ * запрашивается заново, и на карточке появляются новые счётчики.
+ */
+async function printImage(name) {
+  // U4: следующая печать не начинается, пока нет ответа на текущую.
+  if (printing !== null) return;
+  // Во время печати список не меняется (loadImages), поэтому эта карточка
+  // остаётся на странице до ответа.
+  const card = cards.get(name);
+  // U4: disabled в setButtons снимает фокус с кнопки (он уходит на body) и
+  // сам его не возвращает: следующий пробел листал бы страницу, а не
+  // печатал снова. Поэтому до блока кнопок запоминается, была ли в фокусе
+  // эта кнопка.
+  const keepFocus = document.activeElement === card.button;
+  printing = name;
+  // U5: строка прошлой ошибки печати живёт до следующего нажатия на этой
+  // карточке — то есть до сих пор.
+  if (card.fail !== null) {
+    card.fail.remove();
+    card.fail = null;
+  }
+  setButtons();
+
+  let failure = null;
+  let answered = false;
+  try {
+    // U4: тайм-аута нет — длинная картинка законно печатается долго, а
+    // зависание принтера ограничивает сервер (P4).
+    const response = await fetch("/api/print/" + encodeURIComponent(name), {method: "POST"});
+    answered = true;
+    // U4, W6: «Напечатано» — только при 200 (W4 п. 6), других удачных
+    // ответов у печати нет. 404, 409, 422, 503 и 500 — отказы со строкой
+    // detail; проверка «>= 500» показала бы «Напечатано» на 409 и 422, а
+    // бумага из принтера не вышла.
+    if (response.status !== 200) failure = await problemText(response);
+  } catch (err) {
+    // U4: fetch отклонён — сервер недоступен.
+    failure = NO_ANSWER;
+  }
+
+  printing = null;
+  if (failure === null) {
+    toast(PRINTED);
+  } else {
+    card.fail = makeFail(failure);
+    card.el.append(card.fail);
+  }
+  // U4: кнопки снова доступны при любом исходе.
+  setButtons();
+  // U4: фокус — снова на кнопку этой карточки, уже доступную, если за время
+  // печати оператор не перевёл его сам (иначе он не на body). Пересоздаст
+  // карточку ответ списка — фокус перенесёт showList.
+  // U3, U4: пока открыт просмотр во весь экран, фокус не возвращается: кнопка
+  // под затемнением, и пробел или Enter напечатали бы картинку ещё раз.
+  if (keepFocus && document.activeElement === document.body && $("peek").dataset.open !== "true") card.button.focus({preventScroll: true});
+  if (answered) loadImages();
+}
+
+// U3, U4: второй и следующие щелчки одного двойного (тройного) щелчка не
+// доходят ни до одного обработчика страницы. Первый щелчок уже открыл или
+// закрыл просмотр или запустил печать, и второй попал бы в то, что оказалось
+// под указателем: закрыл бы только что открытый просмотр, нажал бы «Печать»
+// под затемнением или напечатал бы ещё раз после быстрого ответа. Слушатель
+// на document в фазе захвата (true) успевает раньше миниатюры, просмотра и
+// кнопки. Одиночный щелчок (detail 1) и клавиатура (detail 0) проходят.
+document.addEventListener("click", (event) => {
+  if (event.detail > 1) event.stopPropagation();
+}, true);
+$("peek").addEventListener("click", closePeek);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closePeek();
+});
+
+// U5: оба запроса уходят сразу при загрузке; до первого ответа список пуст.
+loadImages();
+loadPrinter();
+// U5: список — каждые 3 с, кроме времени печати: карточку не меняют под
+// рукой оператора, а свежий список придёт сразу после ответа печати (U4).
+// Тик пропускается и пока не вернулся прежний запрос списка: на медленном
+// диске (iCloud) ответ идёт дольше 3 с, и без пропуска запросы копились бы.
+setInterval(() => { if (printing === null && listPending === 0) loadImages(); }, 3000);
+// U1, U5: принтер — каждые 5 с: кабель могут вынуть и вставить в любой момент.
+setInterval(loadPrinter, 5000);
+</script>
+</body>
+</html>
